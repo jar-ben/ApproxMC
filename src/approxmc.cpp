@@ -116,6 +116,7 @@ bool AppMC::add_hash(uint32_t num_xor_cls, vector<Lit>& assumps, uint32_t total_
     for (uint32_t i = 0; i < num_xor_cls; i++) {
         //new activation variable
         solver->new_var();
+        exSolver->new_var();
         uint32_t act_var = solver->nVars()-1;
         assumps.push_back(Lit(act_var, true));
 
@@ -128,12 +129,109 @@ bool AppMC::add_hash(uint32_t num_xor_cls, vector<Lit>& assumps, uint32_t total_
                 vars.push_back(conf.sampling_set[j]);
             }
         }
+        exSolver->add_xor_clause(vars, rhs);
         solver->add_xor_clause(vars, rhs);
         if (conf.verb_appmc_cls) {
             print_xor(vars, rhs);
         }
     }
     return true;
+}
+
+void AppMC::ex_block_down(vector<uint32_t>& co_ss){
+    exSolver->new_var();
+    uint32_t act_var = exSolver->nVars()-1;
+    for(auto var: co_ss){
+        vector<Lit> cl;
+        cl.push_back(Lit(act_var, true));
+        cl.push_back(Lit(var, false));
+        exSolver->add_clause(cl);
+    }
+    ex_controls.push_back(act_var);
+}
+
+
+int64_t AppMC::bounded_ex_sol_count(
+        uint32_t maxSolutions,
+        const vector<Lit>& assumps,
+        const uint32_t hashCount
+) {
+    cout << "[appmc] "
+    "[ " << std::setw(7) << std::setprecision(2) << std::fixed
+    << (cpuTimeTotal()-total_runtime)
+    << " ]"
+    << " bounded_ex_sol_count looking for " << std::setw(4) << maxSolutions << " solutions"
+    << " -- hashes active: " << hashCount << endl;
+
+    //Set up things for adding clauses that can later be removed
+    vector<lbool> model;
+    vector<Lit> new_assumps(assumps);
+    exSolver->new_var();
+    uint32_t act_var = exSolver->nVars()-1;
+    new_assumps.push_back(Lit(act_var, true));
+
+    //each var from ex_control corresponds to an activation (tseitin) variable corresponding to an already explored SS
+    //here we sat that we are looking for a subset of one of the explored SSes
+    vector<Lit> controls;
+    for(auto var: ex_controls){
+        controls.push_back(Lit(var, false));
+    }
+    controls.push_back(Lit(act_var, false));
+
+    if (hashCount > 2) {
+        exSolver->simplify(&new_assumps);
+    }
+
+    uint64_t solutions = 0;
+    lbool ret;
+    double last_found_time = cpuTimeTotal();
+    while (solutions < maxSolutions) {
+        ret = exSolver->solve(&new_assumps);
+        assert(ret == l_False || ret == l_True);
+
+        if (conf.verb >=2 ) {
+            cout << "[appmc] bounded_sol_count ret: " << std::setw(7) << ret;
+            if (ret == l_True) {
+                cout << " sol no.  " << std::setw(3) << solutions;
+            } else {
+                cout << " No more. " << std::setw(3) << "";
+            }
+            cout << " T: "
+            << std::setw(7) << std::setprecision(2) << std::fixed << (cpuTimeTotal()-total_runtime)
+            << " -- hashes act: " << hashCount
+            << " -- T since last: "
+            << std::setw(7) << std::setprecision(2) << std::fixed << (cpuTimeTotal()-last_found_time)
+            << endl;
+            last_found_time = cpuTimeTotal();
+        }
+
+        if (ret != l_True) {
+            break;
+        }
+        model = exSolver->get_model();
+
+        if (solutions < maxSolutions) {
+            vector<Lit> lits;
+            lits.push_back(Lit(act_var, false));
+            for (const uint32_t var: conf.sampling_set) {
+                if (model[var] != l_Undef) {
+                    lits.push_back(Lit(var, model[var] == l_True));
+                } else {
+                    assert(false);
+                }
+            }
+            exSolver->add_clause(lits);
+        }
+        solutions++;
+    }
+
+    //Remove clauses added
+    vector<Lit> cl_that_removes;
+    cl_that_removes.push_back(Lit(act_var, false));
+    exSolver->add_clause(cl_that_removes);
+    cout << "ex solutions: " << solutions << endl;
+    assert(ret != l_Undef);
+    return solutions;
 }
 
 int64_t AppMC::bounded_sol_count(
@@ -188,10 +286,13 @@ int64_t AppMC::bounded_sol_count(
 
         if (solutions < maxSolutions) {
             vector<Lit> lits;
+            vector<uint32_t> ss;
             lits.push_back(Lit(act_var, false));
             for (const uint32_t var: conf.sampling_set) {
                 if (solver->get_model()[var] != l_Undef) {
                     lits.push_back(Lit(var, solver->get_model()[var] == l_True));
+                    //TODO: we can perform model extension here to enlarge SS
+                    if(model[var] != l_True) ss.push_back(var);
                 } else {
                     assert(false);
                 }
@@ -200,6 +301,7 @@ int64_t AppMC::bounded_sol_count(
                 cout << "[appmc] Adding banning clause: " << lits << endl;
             }
             solver->add_clause(lits);
+            ex_block_down(ss);
         }
         solutions++;
     }
@@ -351,7 +453,11 @@ bool AppMC::count(SATCount& count)
             uint64_t swapVar = hashCount;
             SetHash(hashCount,hashVars,assumps);
             cout << "[appmc] hashes active: " << std::setw(6) << hashCount << endl;
-            int64_t currentNumSolutions = bounded_sol_count(conf.threshold + 1, assumps, hashCount);
+            int64_t exploredInCell = bounded_ex_sol_count(conf.threshold + 1, assumps, hashCount);
+            cout << "explored in cell: " << exploredInCell << ", threshold: " << conf.threshold << endl;
+            int64_t currentNumSolutions = exploredInCell;
+            if(exploredInCell < conf.threshold + 1)
+                currentNumSolutions = bounded_sol_count(conf.threshold + 1, assumps, hashCount);
 
             //cout << currentNumSolutions << ", " << threshold << endl;
             if (!conf.logfilename.empty()) {

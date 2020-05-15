@@ -67,6 +67,7 @@ public:
     uint32_t loThresh;
     uint32_t hiThresh;
     SATSolver* solver = NULL;
+    SATSolver* exSolver = NULL;
     void printVersionInfo() const;
 
 private:
@@ -83,6 +84,14 @@ private:
         const vector<Lit>& assumps,
         const uint32_t hashCount
     );
+
+    int64_t bounded_ex_sol_count(
+        uint32_t maxSolutions,
+        const vector<Lit>& assumps,
+        const uint32_t hashCount
+    );
+    void ex_block_down(vector<uint32_t>& ss);
+    vector<uint32_t> ex_controls;
 
     void readInAFile(SATSolver* solver2, const string& filename);
     void readInStandardInput(SATSolver* solver2);
