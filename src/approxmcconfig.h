@@ -45,6 +45,7 @@ struct AppMCConfig {
     std::vector<uint32_t> sampling_set;
     double kappa = 0.638;      /* Corresponds to epsilon=16 */
     std::string logfilename = "";
+    std::string inputfile = "";
 };
 
 #endif //APPMCCONFIG

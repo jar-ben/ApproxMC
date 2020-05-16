@@ -435,6 +435,7 @@ int main(int argc, char** argv)
              "is larger than the size of the sampling set.\n" << endl;
         exit(-1);
     }
+    conf.inputfile = vm["input"].as<vector<string> >()[0];
 
     return appmc->solve(conf);
 }

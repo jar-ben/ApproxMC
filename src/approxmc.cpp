@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <string.h>
 #include <sstream>
+#include <fstream>
 #include <iostream>
 #include <iomanip>
 #include <map>
@@ -105,13 +106,14 @@ inline T findMin(vector<T>& numList)
     return min;
 }
 
-bool AppMC::add_hash(uint32_t num_xor_cls, vector<Lit>& assumps, uint32_t total_num_hashes)
+bool AppMC::add_hash(uint32_t num_xor_cls, vector<Lit>& assumps, vector<Lit>& exAssumps, uint32_t total_num_hashes)
 {
     const string randomBits =
         GenerateRandomBits(conf.sampling_set.size() * num_xor_cls, total_num_hashes);
 
     bool rhs;
     vector<uint32_t> vars;
+    vector<uint32_t> exVars;
 
     for (uint32_t i = 0; i < num_xor_cls; i++) {
         //new activation variable
@@ -119,17 +121,24 @@ bool AppMC::add_hash(uint32_t num_xor_cls, vector<Lit>& assumps, uint32_t total_
         exSolver->new_var();
         uint32_t act_var = solver->nVars()-1;
         assumps.push_back(Lit(act_var, true));
+        uint32_t exAct_var = exSolver->nVars()-1;
+        exAssumps.push_back(Lit(exAct_var, true));
+
+        assert(std::find(ex_controls.begin(), ex_controls.end(), exAct_var) == ex_controls.end());
 
         vars.clear();
+        exVars.clear();
         vars.push_back(act_var);
+        exVars.push_back(exAct_var);
         rhs = gen_rhs();
 
         for (uint32_t j = 0; j < conf.sampling_set.size(); j++) {
             if (randomBits.at(conf.sampling_set.size() * i + j) == '1') {
                 vars.push_back(conf.sampling_set[j]);
+                exVars.push_back(conf.sampling_set[j]);
             }
         }
-        exSolver->add_xor_clause(vars, rhs);
+        exSolver->add_xor_clause(exVars, rhs);
         solver->add_xor_clause(vars, rhs);
         if (conf.verb_appmc_cls) {
             print_xor(vars, rhs);
@@ -138,22 +147,62 @@ bool AppMC::add_hash(uint32_t num_xor_cls, vector<Lit>& assumps, uint32_t total_
     return true;
 }
 
+// We parse the input file again, which is definitively not the best approach here. This functionality should be provided by the solver (cryptominisat)
+// The purpose of this function is to build hitmaps
+// hitmap_pos[i] contains the list of clauses (ids of the clauses) that contain literal i + 1
+// hitmap_neg[i] contains the list of clauses (ids of the clauses) that contain literal -(i + 1)
+void AppMC::build_hitmaps(const string& path){
+    std::ifstream infile(path, std::ifstream::in);
+
+    vector<string> clauses_str;
+    string line;
+    string pom;
+    int vars;
+    while (getline(infile, line))
+    {
+            if (line[0] == 'p'){
+                    std::istringstream is(line);
+                    is >> pom;      // p
+                    is >> pom;      // cnf
+                    is >> vars;     //number of variables
+            }
+            else if(line[0] == 'c')
+                    continue;
+            else{
+                    clauses_str.push_back(line);
+            }
+    }
+    hitmap_pos.resize(vars);
+    hitmap_neg.resize(vars);
+    assert(clauses_str.size() <= conf.sampling_set.size());
+    for(size_t i = 0; i < conf.sampling_set.size(); i++){
+        std::istringstream is(clauses_str[i]);
+        int lit;
+        while(is >> lit && lit != 0){
+            if(lit > 0)
+                hitmap_pos[lit - 1].push_back(i);
+            else
+                hitmap_neg[(-1 * lit) - 1].push_back(i);	
+	}
+    }
+}
+
 void AppMC::ex_block_down(vector<uint32_t>& co_ss){
     exSolver->new_var();
     uint32_t act_var = exSolver->nVars()-1;
     for(auto var: co_ss){
         vector<Lit> cl;
         cl.push_back(Lit(act_var, true));
-        cl.push_back(Lit(var, false));
+        cl.push_back(Lit(var, false));        
         exSolver->add_clause(cl);
+        ss_clauses.push_back(vector<int>{act_var, var});
     }
     ex_controls.push_back(act_var);
 }
 
-
-int64_t AppMC::bounded_ex_sol_count(
+vector<vector<Lit>> AppMC::bounded_ex_sol_count(
         uint32_t maxSolutions,
-        const vector<Lit>& assumps,
+        const vector<Lit>& exAssumps,
         const uint32_t hashCount
 ) {
     cout << "[appmc] "
@@ -165,7 +214,7 @@ int64_t AppMC::bounded_ex_sol_count(
 
     //Set up things for adding clauses that can later be removed
     vector<lbool> model;
-    vector<Lit> new_assumps(assumps);
+    vector<Lit> new_assumps(exAssumps);
     exSolver->new_var();
     uint32_t act_var = exSolver->nVars()-1;
     new_assumps.push_back(Lit(act_var, true));
@@ -177,42 +226,25 @@ int64_t AppMC::bounded_ex_sol_count(
         controls.push_back(Lit(var, false));
     }
     controls.push_back(Lit(act_var, false));
+    exSolver->add_clause(controls);
 
     if (hashCount > 2) {
         exSolver->simplify(&new_assumps);
     }
 
-    uint64_t solutions = 0;
+    vector<vector<Lit>> solutions;
     lbool ret;
     double last_found_time = cpuTimeTotal();
-    while (solutions < maxSolutions) {
+    while (solutions.size() < maxSolutions) {
         ret = exSolver->solve(&new_assumps);
         assert(ret == l_False || ret == l_True);
-
-        if (conf.verb >=2 ) {
-            cout << "[appmc] bounded_sol_count ret: " << std::setw(7) << ret;
-            if (ret == l_True) {
-                cout << " sol no.  " << std::setw(3) << solutions;
-            } else {
-                cout << " No more. " << std::setw(3) << "";
-            }
-            cout << " T: "
-            << std::setw(7) << std::setprecision(2) << std::fixed << (cpuTimeTotal()-total_runtime)
-            << " -- hashes act: " << hashCount
-            << " -- T since last: "
-            << std::setw(7) << std::setprecision(2) << std::fixed << (cpuTimeTotal()-last_found_time)
-            << endl;
-            last_found_time = cpuTimeTotal();
-        }
-
         if (ret != l_True) {
             break;
         }
         model = exSolver->get_model();
 
-        if (solutions < maxSolutions) {
+        if (solutions.size() < maxSolutions) {
             vector<Lit> lits;
-            lits.push_back(Lit(act_var, false));
             for (const uint32_t var: conf.sampling_set) {
                 if (model[var] != l_Undef) {
                     lits.push_back(Lit(var, model[var] == l_True));
@@ -220,24 +252,54 @@ int64_t AppMC::bounded_ex_sol_count(
                     assert(false);
                 }
             }
+            solutions.push_back(lits);
+            lits.push_back(Lit(act_var, false));
             exSolver->add_clause(lits);
         }
-        solutions++;
     }
 
     //Remove clauses added
     vector<Lit> cl_that_removes;
     cl_that_removes.push_back(Lit(act_var, false));
     exSolver->add_clause(cl_that_removes);
-    cout << "ex solutions: " << solutions << endl;
+    cout << "ex solutions: " << solutions.size() << endl;
     assert(ret != l_Undef);
     return solutions;
+}
+
+vector<lbool> AppMC::ex_model_extension(vector<lbool> model){
+    vector<bool> extension(conf.sampling_set.size(), false);
+    for(int var = 0; var < hitmap_pos.size(); var++){    
+        if(var < conf.sampling_set.size()) continue; //we care only about the original literals    
+        //assert that var is not in conf.sampling_set
+        if(model[var] == l_True){
+            for(auto c: hitmap_pos[var]){
+                extension[c] = true;
+            }
+        }else{
+            assert(model[var] == l_False);
+            for(auto c: hitmap_neg[var]){
+                extension[c] = true;
+            }
+        }
+    }
+
+    int ext_size = 0;
+    for(int i = 0; i < extension.size(); i++){
+        if(extension[i]){
+            model[conf.sampling_set[i]] = l_False;
+            ext_size++;
+        }
+    }
+    ss_history.push_back(extension);    
+    return model;
 }
 
 int64_t AppMC::bounded_sol_count(
         uint32_t maxSolutions,
         const vector<Lit>& assumps,
-        const uint32_t hashCount
+        const uint32_t hashCount,
+        vector<vector<Lit>> exploredInCell
 ) {
     cout << "[appmc] "
     "[ " << std::setw(7) << std::setprecision(2) << std::fixed
@@ -252,11 +314,17 @@ int64_t AppMC::bounded_sol_count(
     solver->new_var();
     uint32_t act_var = solver->nVars()-1;
     new_assumps.push_back(Lit(act_var, true));
+
+    for(auto lits: exploredInCell){
+        lits.push_back(Lit(act_var, false));
+        solver->add_clause(lits);
+    }
+
     if (hashCount > 2) {
         solver->simplify(&new_assumps);
     }
 
-    uint64_t solutions = 0;
+    int64_t solutions = exploredInCell.size();
     lbool ret;
     double last_found_time = cpuTimeTotal();
     while (solutions < maxSolutions) {
@@ -283,16 +351,16 @@ int64_t AppMC::bounded_sol_count(
             break;
         }
         model = solver->get_model();
+        model = ex_model_extension(model);
 
         if (solutions < maxSolutions) {
             vector<Lit> lits;
             vector<uint32_t> ss;
             lits.push_back(Lit(act_var, false));
             for (const uint32_t var: conf.sampling_set) {
-                if (solver->get_model()[var] != l_Undef) {
-                    lits.push_back(Lit(var, solver->get_model()[var] == l_True));
-                    //TODO: we can perform model extension here to enlarge SS
-                    if(model[var] != l_True) ss.push_back(var);
+                if (model[var] != l_Undef) {
+                    lits.push_back(Lit(var, model[var] == l_True));
+                    if(model[var] == l_True) ss.push_back(var);
                 } else {
                     assert(false);
                 }
@@ -348,7 +416,7 @@ string AppMC::GenerateRandomBits(const uint32_t size, const uint32_t num_hashes)
 int AppMC::solve(AppMCConfig _conf)
 {
     conf = _conf;
-
+    build_hitmaps(conf.inputfile);
     openLogFile();
     randomEngine.seed(conf.seed);
     total_runtime = cpuTimeTotal();
@@ -374,23 +442,27 @@ int AppMC::solve(AppMCConfig _conf)
     return correctReturnValue(l_True);
 }
 
-void AppMC::SetHash(uint32_t clausNum, std::map<uint64_t,Lit>& hashVars, vector<Lit>& assumps)
+void AppMC::SetHash(uint32_t clausNum, std::map<uint64_t,Lit>& hashVars, std::map<uint64_t,Lit>& exHashVars, vector<Lit>& assumps, vector<Lit>& exAssumps)
 {
+    assert(assumps.size() == exAssumps.size());
     if (clausNum < assumps.size()) {
         uint64_t numberToRemove = assumps.size()- clausNum;
         for (uint64_t i = 0; i<numberToRemove; i++) {
             assumps.pop_back();
+            exAssumps.pop_back();
         }
     } else {
         if (clausNum > assumps.size() && assumps.size() < hashVars.size()) {
             for (uint32_t i = assumps.size(); i< hashVars.size() && i < clausNum; i++) {
                 assumps.push_back(hashVars[i]);
+                exAssumps.push_back(exHashVars[i]);
             }
         }
         if (clausNum > hashVars.size()) {
-            add_hash(clausNum-hashVars.size(), assumps, clausNum);
+            add_hash(clausNum-hashVars.size(), assumps, exAssumps, clausNum);
             for (uint64_t i = hashVars.size(); i < clausNum; i++) {
                 hashVars[i] = assumps[i];
+                exHashVars[i] = exAssumps[i];
             }
         }
     }
@@ -402,6 +474,7 @@ bool AppMC::count(SATCount& count)
     vector<uint64_t> numHashList;
     vector<int64_t> numCountList;
     vector<Lit> assumps;
+    vector<Lit> exAssumps;
 
     uint64_t hashCount = conf.start_iter;
     uint64_t hashPrev = 0;
@@ -410,7 +483,7 @@ bool AppMC::count(SATCount& count)
     double myTime = cpuTimeTotal();
     cout << "[appmc] Starting up, initial measurement" << endl;
     if (hashCount == 0) {
-        int64_t currentNumSolutions = bounded_sol_count(conf.threshold+1, assumps, count.hashCount);
+        int64_t currentNumSolutions = bounded_sol_count(conf.threshold+1, assumps, count.hashCount, vector<vector<Lit>>());
         if (!conf.logfilename.empty()) {
             logfile << "appmc:"
             <<"0:0:"
@@ -430,9 +503,11 @@ bool AppMC::count(SATCount& count)
     }
 
     for (uint32_t j = 0; j < conf.measurements; j++) {
+        cout << "     ==== " << j << " out of " << conf.measurements << endl;
         map<uint64_t,int64_t> countRecord;
         map<uint64_t,uint32_t> succRecord;
         map<uint64_t,Lit> hashVars; //map assumption var to XOR hash
+        map<uint64_t,Lit> exHashVars; //map assumption var to XOR hash
 
 
         //Note, the rank of a random NxN matrix is not N of course. It has an expected
@@ -451,13 +526,15 @@ bool AppMC::count(SATCount& count)
                  << " ind set size: " << std::setw(6) << conf.sampling_set.size() << endl;
             myTime = cpuTimeTotal();
             uint64_t swapVar = hashCount;
-            SetHash(hashCount,hashVars,assumps);
+            SetHash(hashCount,hashVars,exHashVars,assumps,exAssumps);
             cout << "[appmc] hashes active: " << std::setw(6) << hashCount << endl;
-            int64_t exploredInCell = bounded_ex_sol_count(conf.threshold + 1, assumps, hashCount);
-            cout << "explored in cell: " << exploredInCell << ", threshold: " << conf.threshold << endl;
-            int64_t currentNumSolutions = exploredInCell;
-            if(exploredInCell < conf.threshold + 1)
-                currentNumSolutions = bounded_sol_count(conf.threshold + 1, assumps, hashCount);
+            int64_t currentNumSolutions = 0;
+            vector<vector<Lit>> exploredInCell;
+            exploredInCell = bounded_ex_sol_count(conf.threshold + 1, exAssumps, hashCount);
+            cout << "explored in cell: " << exploredInCell.size() << ", threshold: " << conf.threshold << endl;
+            currentNumSolutions = exploredInCell.size();
+            if(currentNumSolutions < conf.threshold + 1)
+                currentNumSolutions = bounded_sol_count(conf.threshold + 1, assumps, hashCount, exploredInCell);
 
             //cout << currentNumSolutions << ", " << threshold << endl;
             if (!conf.logfilename.empty()) {
@@ -467,7 +544,7 @@ bool AppMC::count(SATCount& count)
                 << (int)(currentNumSolutions == (conf.threshold + 1)) << ":"
                 << currentNumSolutions << endl;
             }
-
+            cout << "   sols: " << currentNumSolutions << endl;
             if (currentNumSolutions <= conf.threshold) {
                 numExplored = lowerFib + total_max_xors - hashCount;
 
@@ -532,6 +609,7 @@ bool AppMC::count(SATCount& count)
             hashPrev = swapVar;
         }
         assumps.clear();
+        exAssumps.clear();
         hashCount = mPrev;
     }
     if (numHashList.size() == 0) {

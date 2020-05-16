@@ -68,6 +68,7 @@ public:
     uint32_t hiThresh;
     SATSolver* solver = NULL;
     SATSolver* exSolver = NULL;
+    void build_hitmaps(const string& filename);
     void printVersionInfo() const;
 
 private:
@@ -75,23 +76,16 @@ private:
     bool count(SATCount& count);
     void add_scalmc_options();
     bool ScalAppMC(SATCount& count);
-    bool add_hash(uint32_t num_xor_cls, vector<Lit>& assumps, uint32_t total_num_hashes);
-    void SetHash(uint32_t clausNum, std::map<uint64_t,Lit>& hashVars, vector<Lit>& assumps);
+    bool add_hash(uint32_t num_xor_cls, vector<Lit>& assumps, vector<Lit>& exAssumps, uint32_t total_num_hashes);
+    void SetHash(uint32_t clausNum, std::map<uint64_t,Lit>& hashVars, std::map<uint64_t,Lit>& exHashVars, vector<Lit>& assumps, vector<Lit>& exAssumps);
     int correctReturnValue(const lbool ret) const;
 
     int64_t bounded_sol_count(
         uint32_t maxSolutions,
         const vector<Lit>& assumps,
-        const uint32_t hashCount
+        const uint32_t hashCount,
+        vector<vector<Lit>> exploredInCell
     );
-
-    int64_t bounded_ex_sol_count(
-        uint32_t maxSolutions,
-        const vector<Lit>& assumps,
-        const uint32_t hashCount
-    );
-    void ex_block_down(vector<uint32_t>& ss);
-    vector<uint32_t> ex_controls;
 
     void readInAFile(SATSolver* solver2, const string& filename);
     void readInStandardInput(SATSolver* solver2);
@@ -108,6 +102,20 @@ private:
 
     int argc;
     char** argv;
+
+    //exSolver datastructures
+    vector<vector<Lit>> bounded_ex_sol_count(
+        uint32_t maxSolutions,
+        const vector<Lit>& assumps,
+        const uint32_t hashCount
+    );
+    void ex_block_down(vector<uint32_t>& ss);
+    vector<lbool> ex_model_extension(vector<lbool> model);
+    vector<uint32_t> ex_controls;
+    vector<vector<uint32_t>> hitmap_pos;
+    vector<vector<uint32_t>> hitmap_neg;
+    vector<vector<bool>> ss_history;
+    vector<vector<int>> ss_clauses;
 };
 
 
