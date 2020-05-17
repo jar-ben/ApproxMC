@@ -348,7 +348,6 @@ void set_sampling_vars()
         cout << endl;
     }
     appmc->solver->set_sampling_vars(&conf.sampling_set);
-    appmc->exSolver->set_sampling_vars(&conf.sampling_set);
 }
 
 int main(int argc, char** argv)
@@ -378,19 +377,15 @@ int main(int argc, char** argv)
 
     //startTime = cpuTimeTotal();
     appmc->solver = new SATSolver();
-    appmc->exSolver = new SATSolver();
     appmc->solver->set_up_for_scalmc();
-    appmc->exSolver->set_up_for_scalmc();
 
     if (conf.verb > 2) {
         appmc->solver->set_verbosity(conf.verb-2);
     }
     appmc->solver->set_allow_otf_gauss();
-    appmc->exSolver->set_allow_otf_gauss();
 
     if (conf.num_threads > 1) {
         appmc->solver->set_num_threads(conf.num_threads);
-        appmc->exSolver->set_num_threads(conf.num_threads);
     }
 
     if (conf.epsilon < 0.0) {
@@ -421,13 +416,6 @@ int main(int argc, char** argv)
     } else {
         readInStandardInput(appmc->solver);
     }
-
-    while(appmc->exSolver->nVars() < appmc->solver->nVars())
-        appmc->exSolver->new_var();
-
-    cout << "vars in solver: " << appmc->solver->nVars() << endl;
-    cout << "vars in exSolver: " << appmc->solver->nVars() << endl;    
-
     set_sampling_vars();
 
     if (conf.start_iter > conf.sampling_set.size()) {
@@ -435,7 +423,6 @@ int main(int argc, char** argv)
              "is larger than the size of the sampling set.\n" << endl;
         exit(-1);
     }
-    conf.inputfile = vm["input"].as<vector<string> >()[0];
 
     return appmc->solve(conf);
 }
